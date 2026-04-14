@@ -1,0 +1,91 @@
+name: Exchange OVH on-demand
+
+# Déclenché par Claude en éditant .claude/skills/exchange-ovh/.dispatch/latest.json
+# ou par la branche en push (pour laisser l'utilisateur le lancer depuis l'UI).
+on:
+  push:
+    paths:
+      - ".claude/skills/exchange-ovh/.dispatch/latest.json"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "inbox | unread | search | recap | send | reply | move | calendar | contacts"
+        required: true
+        default: "recap"
+      params:
+        description: "JSON d'arguments (ex: {\"query\":\"facture\",\"since\":\"7d\"})"
+        required: false
+        default: "{}"
+
+concurrency:
+  group: exchange-ondemand
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # pour écrire le fichier de log de résultat
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .claude/skills/exchange-ovh/requirements.txt
+
+      - name: Install deps
+        run: pip install -r .claude/skills/exchange-ovh/requirements.txt
+
+      - name: Load dispatch intent
+        id: intent
+        working-directory: .claude/skills/exchange-ovh
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ACTION="${{ github.event.inputs.action }}"
+            PARAMS='${{ github.event.inputs.params }}'
+          elif [ -f .dispatch/latest.json ]; then
+            ACTION=$(python -c "import json;print(json.load(open('.dispatch/latest.json'))['action'])")
+            PARAMS=$(python -c "import json;print(json.dumps(json.load(open('.dispatch/latest.json')).get('params',{})))")
+          else
+            echo "No dispatch intent found" >&2
+            exit 1
+          fi
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          printf 'params<<EOF\n%s\nEOF\n' "$PARAMS" >> "$GITHUB_OUTPUT"
+          echo "Running action=$ACTION params=$PARAMS"
+
+      - name: Run dispatcher
+        id: run
+        working-directory: .claude/skills/exchange-ovh
+        env:
+          OVH_EMAIL: ${{ secrets.OVH_EMAIL }}
+          OVH_PASSWORD: ${{ secrets.OVH_PASSWORD }}
+          OVH_EWS_SERVER: ${{ secrets.OVH_EWS_SERVER }}
+          OVH_TIMEZONE: Europe/Paris
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
+          NOTIFY_WHATSAPP_TO: ${{ secrets.NOTIFY_WHATSAPP_TO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+          ACTION: ${{ steps.intent.outputs.action }}
+          PARAMS_JSON: ${{ steps.intent.outputs.params }}
+          EXCHANGE_SKILL_QUIET: "1"
+        run: python -m scripts.dispatch
+
+      - name: Commit result log
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude/skills/exchange-ovh/.dispatch/result.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(exchange): record dispatch result"
+            git push
+          fi
