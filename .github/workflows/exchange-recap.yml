@@ -1,0 +1,65 @@
+name: Exchange OVH recap
+
+on:
+  schedule:
+    # Cron is UTC. Europe/Paris = UTC+1 (winter) / UTC+2 (summer).
+    # We fire 3 times a day at roughly 08:00, 13:00, 18:00 Paris time year-round
+    # by running twice for the summer/winter offset. GitHub Actions cron is
+    # best-effort; expect ±5-15 min drift.
+    - cron: "0 7 * * *"   # 08:00 Paris (CET) / 09:00 (CEST)
+    - cron: "0 12 * * *"  # 13:00 Paris (CET) / 14:00 (CEST)
+    - cron: "0 17 * * *"  # 18:00 Paris (CET) / 19:00 (CEST)
+  workflow_dispatch: {}
+
+concurrency:
+  group: exchange-recap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  recap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .claude/skills/exchange-ovh/requirements.txt
+
+      - name: Install deps
+        run: pip install -r .claude/skills/exchange-ovh/requirements.txt
+
+      # Persist the recap state file across runs so the "since-last-recap"
+      # window works on ephemeral runners. Cache key rotates daily so we
+      # always refresh; restore falls back to the most recent one.
+      - name: Restore recap state
+        id: state-cache
+        uses: actions/cache@v4
+        with:
+          path: .claude/skills/exchange-ovh/.state
+          key: exchange-recap-state-${{ github.run_id }}
+          restore-keys: |
+            exchange-recap-state-
+
+      - name: Run recap
+        working-directory: .claude/skills/exchange-ovh
+        env:
+          OVH_EMAIL: ${{ secrets.OVH_EMAIL }}
+          OVH_PASSWORD: ${{ secrets.OVH_PASSWORD }}
+          OVH_EWS_SERVER: ${{ secrets.OVH_EWS_SERVER }}
+          OVH_TIMEZONE: Europe/Paris
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
+          NOTIFY_WHATSAPP_TO: ${{ secrets.NOTIFY_WHATSAPP_TO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+          EXCHANGE_SKILL_QUIET: "1"
+        run: python -m scripts.recap --window since-last-recap --notify auto
